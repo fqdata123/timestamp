@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+    "crypto/sha1"
 	"encoding/asn1"
 	"fmt"
 	"io"
@@ -634,19 +635,36 @@ func (t *Timestamp) generateSignedData(tstInfo []byte, signer crypto.Signer, cer
 	signedData.SetContentType(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 16, 1, 4})
 	signedData.GetSignedData().Version = 3
 
-	signingCertV2Bytes, err := t.populateSigningCertificateV2Ext(certificate)
-	if err != nil {
-		return nil, err
-	}
+    var signerInfoConfig pkcs7.SignerInfoConfig
+                
+                 
+  
 
-	signerInfoConfig := pkcs7.SignerInfoConfig{
-		ExtraSignedAttributes: []pkcs7.Attribute{
-			{
-				Type:  asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 16, 2, 47},
-				Value: asn1.RawValue{FullBytes: signingCertV2Bytes},
-			},
-		},
-	}
+    if t.HashAlgorithm.HashFunc() == crypto.SHA1 {
+        // 使用 ESSCertID（V1）
+        essAttr, err := createEssCertIDAttr(certificate)
+        if err != nil {
+            return nil, err
+        }
+        signerInfoConfig = pkcs7.SignerInfoConfig{
+            ExtraSignedAttributes: []pkcs7.Attribute{essAttr},
+        }
+    } else {
+        // 默认逻辑（ESSCertIDv2）
+        signingCertV2Bytes, err := t.populateSigningCertificateV2Ext(certificate)
+        if err != nil {
+            return nil, err
+        }
+        signerInfoConfig = pkcs7.SignerInfoConfig{
+            ExtraSignedAttributes: []pkcs7.Attribute{
+                {
+                    Type:  asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 16, 2, 47},
+                    Value: asn1.RawValue{FullBytes: signingCertV2Bytes},
+                },
+            },
+        }
+    }
+  
 	if !t.AddTSACertificate {
 		signerInfoConfig.SkipCertificates = true
 	}
@@ -677,4 +695,45 @@ func oidInExtensions(oid asn1.ObjectIdentifier, extensions []pkix.Extension) boo
 		}
 	}
 	return false
+}
+
+func createEssCertIDAttr(cert *x509.Certificate) (pkcs7.Attribute, error) {
+	hash := sha1.Sum(cert.Raw)
+
+	issuerAndSerial := struct {
+		Issuer       asn1.RawValue
+		SerialNumber *big.Int
+	}{
+		Issuer:       asn1.RawValue{FullBytes: cert.RawIssuer},
+		SerialNumber: cert.SerialNumber,
+	}
+
+	essCert := struct {
+		CertHash     []byte
+		IssuerSerial interface{} `asn1:"optional"`
+	}{
+		CertHash:     hash[:],
+		IssuerSerial: issuerAndSerial,
+	}
+
+	seq := struct {
+		Certs []interface{} `asn1:"sequence"`
+	}{
+		Certs: []interface{}{essCert},
+	}
+
+	encoded, err := asn1.Marshal(seq)
+	if err != nil {
+		return pkcs7.Attribute{}, err
+	}
+
+	return pkcs7.Attribute{
+		Type: asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 16, 2, 12}, // id-aa-signingCertificate
+		Value: asn1.RawValue{
+			Class:      0,
+			Tag:        16,
+			IsCompound: true,
+			Bytes:      encoded,
+		},
+	}, nil
 }
