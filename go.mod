@@ -1,4 +1,4 @@
-module github.com/digitorus/timestamp
+module github.com/fqdata123/timestamp
 
 go 1.16
 
